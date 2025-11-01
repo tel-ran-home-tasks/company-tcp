@@ -1,165 +1,226 @@
 package telran.employees.service;
 
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutputStream;
-import java.io.Serializable;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.function.BiFunction;
+import java.io.*;
+import java.util.*;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import telran.employees.api.IProgrammer;
 import telran.employees.dto.Programmer;
 import telran.employees.utils.IPersistable;
 
 @SuppressWarnings("serial")
-public class ProgrammerMap implements IProgrammer, IPersistable, Serializable{
-		
-	private HashMap<Integer, Programmer> programmers = new HashMap<>();
+public class ProgrammerMap implements IProgrammer, IPersistable, Serializable {
 
-		@Override
-		public boolean addProgrammer(Programmer programmer) {
-			if(programmer == null)
-			return false;
-			return programmers.putIfAbsent(programmer.getId(), programmer) == null;
-		}
+    private final Map<Integer, Programmer> programmers = new HashMap<>();
+    private final ReentrantReadWriteLock rw = new ReentrantReadWriteLock();
+    private final ReentrantReadWriteLock.ReadLock r = rw.readLock();
+    private final ReentrantReadWriteLock.WriteLock w = rw.writeLock();
 
-		@Override
-		public boolean removeProgrammer(int id) {
-			
-			return programmers.remove(id) != null;
-		}
+    @Override
+    public boolean addProgrammer(Programmer programmer) {
+        if (programmer == null) return false;
+        w.lock();
+        try {
+            return programmers.putIfAbsent(programmer.getId(), deepCopy(programmer)) == null;
+        } finally {
+            w.unlock();
+        }
+    }
 
-		@Override
-		public Programmer getProgrammerData(int id) {
-			
-			return programmers.get(id);
-		}
+    @Override
+    public boolean removeProgrammer(int id) {
+        w.lock();
+        try {
+            return programmers.remove(id) != null;
+        } finally {
+            w.unlock();
+        }
+    }
 
-		@Override
-		public boolean addNewTechnology(int id, String technology) {
-		    if (technology == null) return false;
-		    technology = technology.trim();
-		    if (technology.isEmpty()) return false;
+    @Override
+    public Programmer getProgrammerData(int id) {
+        r.lock();
+        try {
+            Programmer p = programmers.get(id);
+            return p == null ? null : deepCopy(p);
+        } finally {
+            r.unlock();
+        }
+    }
 
-		    Programmer prog = programmers.get(id);
-		    return prog != null && prog.getTechnologies().add(technology);
-		}
+    @Override
+    public boolean addNewTechnology(int id, String technology) {
+        if (technology == null) return false;
+        technology = technology.trim();
+        if (technology.isEmpty()) return false;
 
-		@Override
-		public boolean removeTechnology(int id, String technology) {
-		    if (technology == null) return false;
-		    technology = technology.trim();
-		    if (technology.isEmpty()) return false;
+        w.lock();
+        try {
+            Programmer p = programmers.get(id);
+            if (p == null) return false;
+            Set<String> techs = new HashSet<>(p.getTechnologies());
+            boolean added = techs.add(technology);
+            if (added) {
+                programmers.put(id, withTechnologies(p, techs));
+            }
+            return added;
+        } finally {
+            w.unlock();
+        }
+    }
 
-		    Programmer prog = programmers.get(id);
-		    return prog != null && prog.getTechnologies().remove(technology);
-		}
+    @Override
+    public boolean removeTechnology(int id, String technology) {
+        if (technology == null) return false;
+        technology = technology.trim();
+        if (technology.isEmpty()) return false;
+
+        w.lock();
+        try {
+            Programmer p = programmers.get(id);
+            if (p == null) return false;
+            Set<String> techs = new HashSet<>(p.getTechnologies());
+            boolean removed = techs.remove(technology);
+            if (removed) {
+                programmers.put(id, withTechnologies(p, techs));
+            }
+            return removed;
+        } finally {
+            w.unlock();
+        }
+    }
+
+    @Override
+    public List<Programmer> getProgrammersWithTechnology(String technology) {
+        List<Programmer> res = new ArrayList<>();
+        if (technology == null || technology.isBlank()) return res;
+
+        r.lock();
+        try {
+            for (Programmer p : programmers.values()) {
+                if (p.getTechnologies().contains(technology)) {
+                    res.add(deepCopy(p));
+                }
+            }
+            return res;
+        } finally {
+            r.unlock();
+        }
+    }
+
+    @Override
+    public List<Programmer> getProgrammersWithSalaries(int salaryFrom, int salaryTo) {
+        List<Programmer> res = new ArrayList<>();
+        if (salaryFrom >= salaryTo || salaryFrom <= 0) return res;
+
+        r.lock();
+        try {
+            for (Programmer p : programmers.values()) {
+                int s = p.getSalary();
+                if (s >= salaryFrom && s <= salaryTo) {
+                    res.add(deepCopy(p));
+                }
+            }
+            return res;
+        } finally {
+            r.unlock();
+        }
+    }
+
+    @Override
+    public boolean updateSalary(int id, int salary) {
+        if (salary <= 0) return false;
+        w.lock();
+        try {
+            Programmer p = programmers.get(id);
+            if (p == null || p.getSalary() == salary) return false;
+            programmers.put(id, withSalary(p, salary));
+            return true;
+        } finally {
+            w.unlock();
+        }
+    }
+
+    @Override
+    public Map<String, Set<Programmer>> convertBaseMapToTechProgrammersMap() {
+        Map<String, Set<Programmer>> result = new HashMap<>();
+        r.lock();
+        try {
+            for (Programmer p : programmers.values()) {
+                for (String tech : p.getTechnologies()) {
+                    result.computeIfAbsent(tech, k -> new HashSet<>()).add(deepCopy(p));
+                }
+            }
+            return result;
+        } finally {
+            r.unlock();
+        }
+    }
+
+    public Set<Programmer> getAllProgrammers() {
+        r.lock();
+        try {
+            Set<Programmer> copy = new HashSet<>();
+            for (Programmer p : programmers.values()) copy.add(deepCopy(p));
+            return copy;
+        } finally {
+            r.unlock();
+        }
+    }
+
+    @Override
+    public void save(String fileName) {
+        Map<Integer, Programmer> snapshot = new HashMap<>();
+        r.lock();
+        try {
+            for (var e : programmers.entrySet()) {
+                snapshot.put(e.getKey(), deepCopy(e.getValue()));
+            }
+        } finally {
+            r.unlock();
+        }
+        try (ObjectOutputStream out = new ObjectOutputStream(new FileOutputStream(fileName))) {
+            out.writeObject(snapshot);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public static ProgrammerMap restoreFromFile(String fileName) {
+        ProgrammerMap map = new ProgrammerMap();
+        try (ObjectInputStream in = new ObjectInputStream(new FileInputStream(fileName))) {
+            Object obj = in.readObject();
+            if (obj instanceof Map) {
+                map.w.lock();
+                try {
+                    map.programmers.clear();
+                    ((Map<Integer, Programmer>) obj)
+                            .forEach((k, v) -> map.programmers.put(k, v));
+                } finally {
+                    map.w.unlock();
+                }
+            }
+        } catch (Exception e) {
+            System.out.println(e.getMessage());
+        }
+        return map;
+    }
 
 
-		@Override
-		public List<Programmer> getProgrammersWithTechnology(String technology) {
-			List<Programmer>res = new ArrayList<>();
-			if(technology == null || technology.isBlank())
-			return res;
-			
-			for(Programmer p : programmers.values()) {
-				if(p.getTechnologies().contains(technology))
-					res.add(p);
-			}
-			return res;
-		}
+    private static Programmer deepCopy(Programmer p) {
+        return p == null ? null
+                : new Programmer(p.getId(), p.getName(),
+                p.getTechnologies().toArray(String[]::new), p.getSalary());
+    }
 
-		@Override
-		public List<Programmer> getProgrammersWithSalaries(int salaryFrom, int salaryTo) {
-			List<Programmer>res = new ArrayList<>();
-			if(salaryFrom  >= salaryTo || salaryFrom <=0)
-			return res;
-			for(Programmer p : programmers.values()) {
-				int salary = p.getSalary();
-				if(salary >=salaryFrom && salary <= salaryTo)
-					res.add(p);
-			}
-			return res;
-		}
+    private static Programmer withSalary(Programmer p, int newSalary) {
+        return new Programmer(p.getId(), p.getName(),
+                p.getTechnologies().toArray(String[]::new), newSalary);
+    }
 
-		@Override
-		public boolean updateSalary(int id, int salary) {
-			if(salary <=0)
-			return false;
-			Programmer prog = programmers.get(id);
-			if( prog == null || salary == prog.getSalary())
-				return false;
-			prog.setSalary(salary);
-			return true;
-		}
-
-		@Override
-		public Map<String, Set<Programmer>> convertBaseMapToTechProgrammersMap() {
-			Map<String, Set<Programmer>> techProgrammers = new HashMap<>();
-			for(Programmer p : programmers.values()) {
-				for(String tech : p.getTechnologies()) {
-					Set<Programmer> progs = techProgrammers.getOrDefault(tech, new HashSet<>());
-					techProgrammers.compute(tech, new BiFunction<String, Set<Programmer>, Set<Programmer>>() {
-
-						@Override
-						public Set<Programmer> apply(String t, Set<Programmer> u) {
-							if(u == null) 
-								u = new HashSet<>();
-							u.add(p);						
-							return u;
-						}
-					});
-				}
-			}
-			return techProgrammers;
-		}
-		
-		public static Map<String, Set<Programmer>> convertOtherMapToTechProgrammersMap(Map<Integer, Programmer> programmers) {
-			Map<String, Set<Programmer>> techProgrammers = new HashMap<>();
-			for(Programmer p : programmers.values()) {
-				for(String tech : p.getTechnologies()) {
-					Set<Programmer> progs = techProgrammers.getOrDefault(tech, new HashSet<>());
-					techProgrammers.compute(tech, new BiFunction<String, Set<Programmer>, Set<Programmer>>() {
-
-						@Override
-						public Set<Programmer> apply(String t, Set<Programmer> u) {
-							if(u == null) 
-								u = new HashSet<>();
-							u.add(p);						
-							return u;
-						}
-					});
-				}
-			}
-			return techProgrammers;
-		}
-
-		@Override
-		public void save(String fileName) {
-			try(ObjectOutputStream output = new ObjectOutputStream(new FileOutputStream(fileName))){
-				output.writeObject(this);
-			} catch (Exception e) {
-				e.printStackTrace();
-			}
-			
-		}
-		
-		public static ProgrammerMap restoreFromFile(String fileName) {
-			try(ObjectInputStream input = new ObjectInputStream(new FileInputStream(fileName))){
-				return (ProgrammerMap) input.readObject();
-			}catch (Exception e) {
-			System.out.println(e.getMessage());
-			return new ProgrammerMap();
-			}
-		}
-		
-		public Set<Programmer> getAllProgrammers(){
-			return new HashSet<Programmer>(programmers.values());
-		}
+    private static Programmer withTechnologies(Programmer p, Set<String> techs) {
+        return new Programmer(p.getId(), p.getName(),
+                techs.toArray(String[]::new), p.getSalary());
+    }
 }
